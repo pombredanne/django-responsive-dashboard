@@ -6,52 +6,57 @@ from django.core import urlresolvers
 from django.utils.importlib import import_module
 from django.db.models.fields import FieldDoesNotExist
 from django.core.urlresolvers import NoReverseMatch
+from django.views.generic.base import TemplateView
 import imp
+import copy
 
 class Dashboard(object):
     """ Base class for dashboards
     """
     title = ''
     app = ''
-    template = 'responsive_dashboard/dashboard.html'
-
-    def __init__(self):
-        responsive_dashboards['{0}__{1}'.format(self.app, self.title)] = self
+    template_name = 'responsive_dashboard/dashboard.html'
 
 
-class Dashlet(object):
+class Dashlet(TemplateView):
     """ Base class for dashlets
+    Extends TemplateView so it could actually be a view as well.
     """
     title = None
-    template = 'responsive_dashboard/dashlet.html'
+    verbose_name = None
+    template_name = 'responsive_dashboard/dashlet.html'
     has_config = False
     template_dict = {}
     require_permissions = ()
-    require_permissions_or = () # Allow if any of these permissions are present 
+    require_permissions_or = () # Allow if any of these permissions are present
     require_apps = ()
     columns = 1
     responsive = True # Resize to fit mobile devices (depends on css)
     allow_multiple = False # User can add duplicates of this dashlet
-    
-    def __init__(self, **kwargs):
-        title = kwargs.pop('title', None)
-        if title:
-            self.title=title
-        self.template_dict = {
-            'title': title,
-            'has_config': self.has_config,
-        }
-    
+
+    def get_context_data(self, **kwargs):
+        context = super(Dashlet, self).get_context_data(**kwargs)
+        context['title'] = self.title
+        context['has_config'] = self.has_config
+        return context
+
     def _render(self):
+        context = self.get_context_data()
+        context['dashlet'] = self
         self.template_dict['dashlet'] = self
-        return render_to_string(self.template, self.template_dict, context_instance=RequestContext(self.request))
+        return render_to_string(self.template_name, context, context_instance=RequestContext(self.request))
 
     def __unicode__(self):
         return self._render()
-    
+
     def set_request(self, request):
         """ Set the html request from the view """
         self.request = request
+
+    def get_verbose_name(self):
+        if self.verbose_name:
+            return self.verbose_name
+        return self.title
 
     def _check_perm(self):
         """ Check if user has permission to view """
@@ -65,18 +70,18 @@ class Dashlet(object):
                 if self.request.user.has_perm(perm):
                     allow = True
         return allow
-    
+
     def _check_apps(self):
         """ Check if this dashlet has the required apps installed for usage """
         for app in self.require_apps:
             if not app in settings.INSTALLED_APPS:
                 return False
         return True
-    
+
     def get_width(self):
         """ Get width in pixels for dashlet. Assuming 300px width and 20px gutters """
         return (self.columns * (300 + 20)) - 20
-    
+
 
     def allow_usage(self):
         """ Public method to check if the user allowed to use this dashlet """
@@ -90,68 +95,59 @@ class Dashlet(object):
 
 
 class AdminListDashlet(Dashlet):
-    template = 'responsive_dashboard/admin_list_dashlet.html'
+    template_name = 'responsive_dashboard/admin_list_dashlet.html'
     app_label = None
     order = None
     models = ()
     models_exclude = ()
-    
-    def __init__(self, **kwargs):
-        if 'app_label' in kwargs:
-            self.app_label = kwargs.pop('app_label', None)
-        super(AdminListDashlet, self).__init__(**kwargs)
-        
-    def _render(self):
+
+    def get_context_data(self):
+        context = super(AdminListDashlet, self).get_context_data()
         app_list_url = urlresolvers.reverse('admin:app_list', args=(self.app_label,))
         content_types = ContentType.objects.filter(app_label=self.app_label)
         if self.models:
             content_types = content_types.filter(model__in=self.models)
         if self.models_exclude:
             content_types = content_types.exclude(model__in=self.models_exclude)
-        
+
         for ct in content_types:
             try:
                 if self.request.user.has_perm('{}.change_{}'.format(ct.app_label, ct.model)):
                     ct.change_url = urlresolvers.reverse('admin:{0}_{1}_changelist'.format(self.app_label, ct.model))
             except NoReverseMatch: # Probably no admin registered for this model
                 pass
-        self.template_dict = dict(self.template_dict.items() + {
+        context = dict(context.items() + {
             'content_types': content_types,
             'app_list_url': app_list_url,
         }.items())
-        return super(AdminListDashlet, self)._render()
+        return context
 
 
 class ListDashlet(Dashlet):
     """ Shows a list of data from a model """
-    template = 'responsive_dashboard/list_dashlet.html'
+    template_name = 'responsive_dashboard/list_dashlet.html'
     model = None
     fields = ('__str__',)
     queryset = None
     order_by = ()
     count = 5
     show_change = True
-    show_add = False
     show_custom_link = None
     custom_link_text = None
-    first_column_is_link = False
+    first_column_is_link = True
     allow_multiple = True
     extra_links = {}
-    
-    def __init__(self, **kwargs):
-        if 'model' in kwargs:
-            self.model = kwargs.pop('model', None)
-        super(ListDashlet, self).__init__(**kwargs)
-    
-    def _render(self):
+
+    def get_context_data(self, **kwargs):
+        context = super(ListDashlet, self).get_context_data(**kwargs)
         if self.queryset:
             object_list = self.queryset
         else:
             object_list = self.model.objects.all()
-        
+
         if self.order_by:
             object_list = object_list.order_by(*self.order_by)
-        
+
         object_list = object_list[:self.count]
 
         results = []
@@ -161,7 +157,7 @@ class ListDashlet(Dashlet):
                 result_row += [getattr(obj, field)]
             obj.result_row = result_row
             results += [obj]
-        
+
         headers = []
         for field in self.fields:
             if field == '__str__':
@@ -175,24 +171,29 @@ class ListDashlet(Dashlet):
                 except FieldDoesNotExist:
                     headers += [field]
 
-        self.template_dict = dict(self.template_dict.items() + {
-            'opts': self.model._meta,
+        opts = self.model._meta
+        has_add_permission = self.request.user.has_perm('{}.add_{}'.format(opts.app_label, opts.model_name))
+        has_change_permission = self.request.user.has_perm('{}.change_{}'.format(opts.app_label, opts.model_name))
+
+        context = dict(context.items() + {
+            'opts': opts,
             'object_list': object_list,
             'results': results,
             'headers': headers,
             'show_change': self.show_change,
-            'show_add': self.show_add,
+            'has_add_permission': has_add_permission,
+            'has_change_permission': has_change_permission,
             'show_custom_link': self.show_custom_link,
             'custom_link_text': self.custom_link_text,
             'first_column_is_link': self.first_column_is_link,
             'extra_links': self.extra_links,
         }.items())
-        return super(ListDashlet, self)._render()
+        return context
 
 
 class LinksListDashlet(Dashlet):
     """ Shows a list of http links """
-    template = "responsive_dashboard/links_list_dashlet.html"
+    template_name = "responsive_dashboard/links_list_dashlet.html"
     links = [
         {
             'text': 'Example Text',
@@ -202,29 +203,27 @@ class LinksListDashlet(Dashlet):
             'required_apps': () # List of apps required for this link to show
         },
     ]
-    
-    def _render(self):
+
+    def get_context_data(self, **kwargs):
+        context = super(LinksListDashlet, self).get_context_data(**kwargs)
+        active_links = []
         for link in self.links:
+            add = True
             if 'perm' in link:
                 for perm in link['perm']:
                     if not self.request.user.has_perm(perm):
-                        self.links.remove(link)
-                        break
+                        add = False
             if 'required_apps' in link:
                 for app in link['required_apps']:
                     if not app in settings.INSTALLED_APPS:
-                        self.links.remove(link)
-                        break
-        
-        self.template_dict = dict(self.template_dict.items() + {
-            'links': self.links,
+                        add = False
+            if add:
+                active_links += [link]
+
+        context = dict(context.items() + {
+            'links': active_links,
         }.items())
-        return super(LinksListDashlet, self)._render()
-
-
-
-class DjangoReportBuilderDashlet(Dashlet):
-    """ Shows a report from django-report-builder """
+        return context
 
 
 class RssFeedDashlet(Dashlet):
@@ -232,7 +231,8 @@ class RssFeedDashlet(Dashlet):
     more_link = None
     limit = 2
 
-    def _render(self):
+    def get_context_data(self, **kwargs):
+        context = super(RssFeedDashlet, self).get_context_data(**kwargs)
         import datetime
         if self.feed_url is None:
             raise ValueError('You must provide a valid feed URL')
@@ -252,29 +252,62 @@ class RssFeedDashlet(Dashlet):
                 # no date for certain feeds
                 pass
             feed_lines.append(entry['summary_detail']['value'])
-        self.template_dict = dict(self.template_dict.items() + {
+        context = dict(context.items() + {
             'list_items': feed_lines,
             'more_link': self.more_link,
         }.items())
-        return super(RssFeedDashlet, self)._render()
+        return context
 
 
+try:
+    from collections import OrderedDict
+except:
+    OrderedDict = dict # pyflakes:ignore
 
-responsive_dashboards = {}
-# code from django-admin-tools THANKS!
-# https://bitbucket.org/izi/django-admin-tools/src/e2732c0083c76862c7d014b7ab25d0dbd5e467c5/admin_tools/dashboard/registry.py
-for app in settings.INSTALLED_APPS:
-    # try to import the app
-    try:
-        app_path = import_module(app).__path__
-    except AttributeError:
-        continue
+def autodiscover():
+    """
+    Auto-discover INSTALLED_APPS report.py modules and fail silently when
+    not present. Borrowed form django.contrib.admin
+    """
+    from django.utils.importlib import import_module
+    from django.utils.module_loading import module_has_submodule
 
-    # try to find a app.dashboard module
-    try:
-        imp.find_module('dashboards', app_path)
-    except ImportError:
-        continue
+    global dashboards
 
-    # looks like we found it so import it !
-    import_module('%s.dashboards' % app)
+    for app in settings.INSTALLED_APPS:
+        mod = import_module(app)
+        # Attempt to import the app's admin module.
+        try:
+            before_import_registry = copy.copy(dashboards)
+            import_module('%s.dashboards' % app)
+        except:
+            dashboards = before_import_registry
+            if module_has_submodule(mod, 'dashboards'):
+                raise
+
+
+class DashboardClassManager(object):
+    """
+    Class to handle registered dashboards class.
+    """
+    _register = OrderedDict()
+
+    def __init__(self):
+        self._register = OrderedDict()
+
+    def register(self, slug, rclass):
+        if slug in self._register:
+            raise ValueError('Slug already exists: %s' % slug)
+        setattr(rclass, 'slug', slug)
+        self._register[slug] = rclass
+
+    def get_dashboard(self, slug):
+        # return class
+        return self._register.get(slug, None)
+
+    def get_dashboards(self):
+        # return clasess
+        return self._register.values()
+
+
+dashboards = DashboardClassManager()

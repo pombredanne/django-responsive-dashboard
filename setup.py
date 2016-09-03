@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name = "django-responsive-dashboard",
-    version = "0.12",
+    version = "1.3.2",
     author = "David Burke",
     author_email = "david@burkesoftware.com",
     description = ("A generic and easy dashboard for Django applications."),
@@ -12,7 +12,7 @@ setup(
     packages=find_packages(),
     include_package_data=True,
     classifiers=[
-        "Development Status :: 4 - Beta",
+        "Development Status :: 5 - Production/Stable",
         'Environment :: Web Environment',
         'Framework :: Django',
         'Programming Language :: Python',
@@ -20,5 +20,5 @@ setup(
         'Intended Audience :: System Administrators',
         "License :: OSI Approved :: BSD License",
     ],
-    install_requires=['django-positions',]
+    install_requires=['django', 'django-positions',]
 )
